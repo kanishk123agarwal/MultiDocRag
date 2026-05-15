@@ -1,0 +1,27 @@
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache / metadata
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Local data & docs
+data/docs/*
+
+# Environment variables
+.env
+
+# IDE / Editor configurations
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
