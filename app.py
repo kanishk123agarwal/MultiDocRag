@@ -2,46 +2,57 @@ import os
 import gradio as gr
 from dotenv import load_dotenv
 from rag.indexer import index_all_documents
+from rag.query_engine import build_multi_doc_engine, query_each_document
 
 # Load env variables (contains GOOGLE_API_KEY)
 load_dotenv()
 
 indexes = {}
+multi_doc_engine = None
 
 def upload_and_index(files):
-    global indexes
+    global indexes, multi_doc_engine
     if not files:
         return "No files uploaded."
     
     os.makedirs("data/docs", exist_ok=True)
-    saved_files = []
     for f in files:
         dest = os.path.join("data/docs", os.path.basename(f.name))
         with open(f.name, "rb") as src, open(dest, "wb") as dst:
             dst.write(src.read())
-        saved_files.append(os.path.basename(f.name))
         
     # Re-index all documents in data/docs/
     indexes = index_all_documents("data/docs")
+    if indexes:
+        multi_doc_engine = build_multi_doc_engine(indexes)
+        
     return f"Indexed {len(indexes)} document(s): {', '.join(indexes.keys())}"
 
 def ask_question(question):
+    global indexes, multi_doc_engine
     if not indexes:
-        return "Please upload and index documents first."
+        return "Please upload and index documents first.", "Please upload and index documents first."
     
-    results = []
-    for doc_name, index in indexes.items():
-        # Setup query engine with top_k=3
-        qe = index.as_query_engine(similarity_top_k=3)
-        response = qe.query(question)
-        results.append(f"### 📄 {doc_name}\n{response}\n---")
+    # 1. Query each document independently
+    doc_answers = query_each_document(indexes, question)
+    answers_md = "\n\n".join([f"### 📄 {doc}:\n{ans}\n---" for doc, ans in doc_answers.items()])
     
-    return "\n\n".join(results)
+    # 2. Query using SubQuestion Query Engine
+    if not multi_doc_engine:
+        multi_doc_engine = build_multi_doc_engine(indexes)
+        
+    try:
+        response = multi_doc_engine.query(question)
+        synthesized_md = str(response)
+    except Exception as e:
+        synthesized_md = f"Error in SubQuestion Engine: {e}"
+        
+    return answers_md, synthesized_md
 
 # Build Gradio UI
-with gr.Blocks(title="MultiDoc RAG - Phase 2") as demo:
-    gr.Markdown("# 📄 MultiDoc RAG — Indexing & Querying")
-    gr.Markdown("Upload PDF research documents, build vector indexes, and query them to verify retrieval.")
+with gr.Blocks(title="MultiDoc RAG - Phase 3") as demo:
+    gr.Markdown("# 📄 MultiDoc RAG — SubQuestion Query Engine")
+    gr.Markdown("Upload PDF research documents, build vector indexes, and query them using independent retrieval and a joint SubQuestion synthesis engine.")
     
     with gr.Row():
         upload = gr.File(label="Upload PDFs", file_count="multiple", file_types=[".pdf"])
@@ -50,11 +61,18 @@ with gr.Blocks(title="MultiDoc RAG - Phase 2") as demo:
     index_status = gr.Textbox(label="Status", interactive=False)
     index_btn.click(upload_and_index, inputs=upload, outputs=index_status)
     
-    question = gr.Textbox(label="Your Question", placeholder="e.g. Summarize the main conclusion of the document.")
-    ask_btn = gr.Button("Query Documents", variant="secondary")
+    question = gr.Textbox(label="Your Question", placeholder="e.g. Compare the conclusions across these papers.")
+    ask_btn = gr.Button("Submit Query", variant="secondary")
     
-    answers_out = gr.Markdown(label="Answers per Document")
-    ask_btn.click(ask_question, inputs=question, outputs=answers_out)
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown("### 📄 Answers per Document")
+            answers_out = gr.Markdown()
+        with gr.Column():
+            gr.Markdown("### 🧠 Synthesized Final Answer (SubQuestion Engine)")
+            synthesized_out = gr.Markdown()
+            
+    ask_btn.click(ask_question, inputs=question, outputs=[answers_out, synthesized_out])
 
 if __name__ == "__main__":
     demo.launch()
