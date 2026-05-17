@@ -100,4 +100,4 @@ with gr.Blocks(title="MultiDoc RAG - Phase 4") as demo:
     ask_btn.click(ask_question, inputs=question, outputs=[answers_out, synthesized_out, conflict_out])
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(server_name="0.0.0.0", share=True)
