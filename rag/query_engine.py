@@ -11,7 +11,7 @@ load_dotenv()
 def build_multi_doc_engine(indexes: dict) -> SubQuestionQueryEngine:
     """Build a SubQuestionQueryEngine over all document indexes."""
     # Configure Gemini settings globally
-    Settings.llm = Gemini(model="models/gemini-2.5-flash")
+    Settings.llm = Gemini(model="models/gemini-3.5-flash")
     Settings.embed_model = GeminiEmbedding(model_name="models/gemini-embedding-001")
 
     tools = []
@@ -36,7 +36,7 @@ def build_multi_doc_engine(indexes: dict) -> SubQuestionQueryEngine:
 def query_each_document(indexes: dict, question: str) -> dict:
     """Query each document independently. Returns {doc_name: answer_text}."""
     # Configure Gemini settings globally
-    Settings.llm = Gemini(model="models/gemini-2.5-flash")
+    Settings.llm = Gemini(model="models/gemini-3.5-flash")
     Settings.embed_model = GeminiEmbedding(model_name="models/gemini-embedding-001")
     
     results = {}

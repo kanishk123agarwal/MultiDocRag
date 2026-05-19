@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure global Settings for Google Gemini LLM and Embeddings
-Settings.llm = Gemini(model="models/gemini-2.5-flash")
+Settings.llm = Gemini(model="models/gemini-3.5-flash")
 Settings.embed_model = GeminiEmbedding(model_name="models/gemini-embedding-001")
 
 def index_single_document(file_path: str) -> VectorStoreIndex:
@@ -29,13 +29,13 @@ def index_single_document(file_path: str) -> VectorStoreIndex:
     return index
 
 def index_all_documents(doc_dir: str) -> dict:
-    """Build one index per PDF. Returns {filename: index}."""
+    """Build one index per document (PDF or TXT). Returns {filename: index}."""
     indexes = {}
     if not os.path.exists(doc_dir):
         return indexes
         
     for fname in os.listdir(doc_dir):
-        if fname.endswith(".pdf"):
+        if fname.endswith(".pdf") or fname.endswith(".txt"):
             path = os.path.join(doc_dir, fname)
             print(f"Indexing: {fname}")
             indexes[fname] = index_single_document(path)

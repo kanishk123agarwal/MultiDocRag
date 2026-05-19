@@ -35,7 +35,7 @@ def detect_conflicts(question: str, doc_answers: dict) -> dict:
 
     prompt = CONFLICT_PROMPT.format(question=question, answers=answers_text)
 
-    llm = Gemini(model="models/gemini-2.5-flash")
+    llm = Gemini(model="models/gemini-3.5-flash")
     response = llm.complete(prompt)
     raw = response.text
 
