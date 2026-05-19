@@ -236,9 +236,11 @@ def clear_documents():
     md, doc_names = get_workspace_documents_status()
     return "All documents cleared from workspace.", [], md, gr.update(choices=doc_names, value=None)
 
-def index_workspace():
+def index_workspace(progress=gr.Progress()):
     global indexes, multi_doc_engine
     doc_dir = "data/docs"
+    
+    progress(0.1, desc="🔍 Checking workspace directory...")
     if not os.path.exists(doc_dir):
         md, doc_names = get_workspace_documents_status()
         paths = get_all_workspace_file_paths()
@@ -250,8 +252,11 @@ def index_workspace():
         paths = get_all_workspace_file_paths()
         return "No documents found to index.", paths, md, gr.update(choices=doc_names, value=None)
         
+    progress(0.3, desc="⚡ Parsing and indexing documents (generating embeddings)...")
     # Index all documents in data/docs/
     indexes = index_all_documents(doc_dir)
+    
+    progress(0.8, desc="🧠 Configuring SubQuestion Query Engine...")
     if indexes:
         multi_doc_engine = build_multi_doc_engine(indexes)
         
