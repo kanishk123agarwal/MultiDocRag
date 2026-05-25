@@ -1,8 +1,9 @@
 import os
-import time
+import concurrent.futures
 import gradio as gr
 from dotenv import load_dotenv
-from rag.indexer import index_all_documents
+import rag.rate_limiter  # noqa: F401 — must be imported first to patch Gemini + GeminiEmbedding
+from rag.indexer import index_all_documents, invalidate_cache
 from rag.query_engine import build_multi_doc_engine
 from rag.conflict_detector import detect_conflicts
 
@@ -88,10 +89,23 @@ body {
     transform: translateY(-1px);
 }
 /* Input background and text overrides for high contrast in light mode */
-input, textarea, select {
+input:not([type="checkbox"]), textarea, select {
     background-color: #ffffff !important;
     color: #1f2937 !important;
     border: 1px solid #d1d5db !important;
+}
+/* Checkbox fix: ensure tick marks are visible and clickable */
+input[type="checkbox"] {
+    appearance: auto !important;
+    -webkit-appearance: checkbox !important;
+    width: 18px !important;
+    height: 18px !important;
+    cursor: pointer !important;
+    accent-color: #4f46e5 !important;
+    opacity: 1 !important;
+    background-color: unset !important;
+    border: unset !important;
+    pointer-events: auto !important;
 }
 .nav-tabs button.selected {
     border-bottom: 2px solid #4f46e5 !important;
@@ -175,6 +189,7 @@ def handle_workspace_change(files):
                 if fname not in display_basenames:
                     try:
                         os.remove(os.path.join(doc_dir, fname))
+                        invalidate_cache(fname)  # clear stale disk cache
                         deleted_any = True
                         if fname in indexes:
                             del indexes[fname]
@@ -202,6 +217,7 @@ def delete_selected_document(doc_name):
     if os.path.exists(path):
         try:
             os.remove(path)
+            invalidate_cache(doc_name)  # clear stale disk cache
         except Exception as e:
             md, doc_names = get_workspace_documents_status()
             paths = get_all_workspace_file_paths()
@@ -222,16 +238,17 @@ def delete_selected_document(doc_name):
 
 def clear_documents():
     global indexes, multi_doc_engine
-    indexes = {}
-    multi_doc_engine = None
     doc_dir = "data/docs"
     if os.path.exists(doc_dir):
         for fname in os.listdir(doc_dir):
             if fname.endswith(".pdf") or fname.endswith(".txt"):
                 try:
                     os.remove(os.path.join(doc_dir, fname))
+                    invalidate_cache(fname)  # clear stale disk cache
                 except Exception:
                     pass
+    indexes = {}
+    multi_doc_engine = None
                     
     md, doc_names = get_workspace_documents_status()
     return "All documents cleared from workspace.", [], md, gr.update(choices=doc_names, value=None)
@@ -239,35 +256,62 @@ def clear_documents():
 def index_workspace(progress=gr.Progress()):
     global indexes, multi_doc_engine
     doc_dir = "data/docs"
-    
+
     progress(0.1, desc="🔍 Checking workspace directory...")
     if not os.path.exists(doc_dir):
         md, doc_names = get_workspace_documents_status()
         paths = get_all_workspace_file_paths()
         return "No documents found to index.", paths, md, gr.update(choices=doc_names, value=None)
-        
+
     files = [f for f in os.listdir(doc_dir) if f.endswith(".pdf") or f.endswith(".txt")]
     if not files:
         md, doc_names = get_workspace_documents_status()
         paths = get_all_workspace_file_paths()
         return "No documents found to index.", paths, md, gr.update(choices=doc_names, value=None)
-        
-    progress(0.3, desc="⚡ Parsing and indexing documents (generating embeddings)...")
-    # Index all documents in data/docs/
+
+    # Check which files have a valid disk cache
+    from rag.indexer import _is_cache_valid
+    cached = [f for f in files if _is_cache_valid(f, os.path.join(doc_dir, f))]
+    new_docs = [f for f in files if f not in cached]
+
+    if new_docs:
+        progress(0.3, desc=f"⚡ Embedding {len(new_docs)} new doc(s) via Gemini API (throttled at 5 RPM)...")
+    else:
+        progress(0.3, desc="⚡ Loading all documents from disk cache (no API calls)...")
+
     indexes = index_all_documents(doc_dir)
-    
+
     progress(0.8, desc="🧠 Configuring SubQuestion Query Engine...")
     if indexes:
         multi_doc_engine = build_multi_doc_engine(indexes)
-        
+
     md, doc_names = get_workspace_documents_status()
     paths = get_all_workspace_file_paths()
-    return f"Indexed {len(indexes)} document(s) successfully.", paths, md, gr.update(choices=doc_names, value=None)
+
+    if cached and new_docs:
+        status_msg = f"✅ {len(cached)} loaded from cache, {len(new_docs)} newly embedded."
+    elif cached:
+        status_msg = f"⚡ All {len(cached)} document(s) loaded from cache instantly — no API calls used."
+    else:
+        status_msg = f"✅ Embedded and indexed {len(indexes)} document(s) successfully."
+
+    return status_msg, paths, md, gr.update(choices=doc_names, value=None)
 
 def get_workspace_documents_status_on_load():
     md, doc_names = get_workspace_documents_status()
     paths = get_all_workspace_file_paths()
     return paths, md, gr.update(choices=doc_names, value=None)
+
+def _query_single_doc(args):
+    """Worker function to query a single document index. Returns (doc_name, answer_or_error)."""
+    doc, index, question = args
+    try:
+        qe = index.as_query_engine(similarity_top_k=6)
+        ans = str(qe.query(question))
+        return doc, ans, None
+    except Exception as e:
+        return doc, None, str(e)
+
 
 def ask_question(question, run_each, run_synthesized, run_conflicts):
     global indexes, multi_doc_engine
@@ -275,51 +319,50 @@ def ask_question(question, run_each, run_synthesized, run_conflicts):
         err_msg = "Please upload and index documents first."
         yield err_msg, err_msg, err_msg, "❌ No documents indexed. Please index documents first."
         return
-    
+
     status_log = "🚦 Starting execution flow...\n"
     answers_md = "⌛ Pending run..." if run_each else "🚫 Disabled."
     synthesized_md = "⌛ Pending run..." if run_synthesized else "🚫 Disabled."
     conflict_md = "⌛ Pending run..." if run_conflicts else "🚫 Disabled."
-    
+
     yield answers_md, synthesized_md, conflict_md, status_log
-    
+
     doc_answers = {}
-    
-    # 1. Query each document independently
+
+    # 1. Query each document independently (parallel)
     if run_each:
-        status_log += f"📄 Step 1: Querying each of the {len(indexes)} documents individually...\n"
+        status_log += f"📄 Step 1: Querying each of the {len(indexes)} documents in parallel...\n"
         yield answers_md, synthesized_md, conflict_md, status_log
-        
-        answers_list = []
-        for i, (doc, index) in enumerate(indexes.items(), 1):
-            status_log += f"👉 [{i}/{len(indexes)}] Querying: {doc}...\n"
-            yield answers_md, synthesized_md, conflict_md, status_log
-            
-            try:
-                qe = index.as_query_engine(similarity_top_k=3)
-                ans = str(qe.query(question))
-                doc_answers[doc] = ans
-                answers_list.append(f"### 📄 {doc}:\n{ans}\n---")
+
+        docs_list = list(indexes.items())
+        args_list = [(doc, index, question) for doc, index in docs_list]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(docs_list), 4)) as executor:
+            futures = {executor.submit(_query_single_doc, args): args[0] for args in args_list}
+            answers_list = []
+            for future in concurrent.futures.as_completed(futures):
+                doc, ans, err = future.result()
+                if err:
+                    status_log += f"   ❌ Error querying {doc}: {err}\n"
+                    answers_list.append(f"### 📄 {doc}:\nError: {err}\n---")
+                else:
+                    doc_answers[doc] = ans
+                    answers_list.append(f"### 📄 {doc}:\n{ans}\n---")
+                    status_log += f"   ✅ Received answer from {doc}\n"
                 answers_md = "\n\n".join(answers_list)
-                status_log += f"   ✅ Received answer from {doc}\n"
-            except Exception as e:
-                status_log += f"   ❌ Error querying {doc}: {e}\n"
-                answers_list.append(f"### 📄 {doc}:\nError: {e}\n---")
-                answers_md = "\n\n".join(answers_list)
-            yield answers_md, synthesized_md, conflict_md, status_log
+                yield answers_md, synthesized_md, conflict_md, status_log
     else:
         status_log += "📄 Step 1: Individual document queries skipped.\n"
         yield answers_md, synthesized_md, conflict_md, status_log
-        
+
     # 2. Query using SubQuestion Query Engine
     if run_synthesized:
         status_log += "🧠 Step 2: Running SubQuestion Query Engine (synthesizing global answer)...\n"
-        status_log += "   ℹ️ Note: This makes multiple sub-queries. Calls are auto-paced (12s delay) to stay under the 5 RPM limit.\n"
         yield answers_md, synthesized_md, conflict_md, status_log
-        
+
         if not multi_doc_engine:
             multi_doc_engine = build_multi_doc_engine(indexes)
-            
+
         try:
             response = multi_doc_engine.query(question)
             synthesized_md = str(response)
@@ -331,7 +374,7 @@ def ask_question(question, run_each, run_synthesized, run_conflicts):
     else:
         status_log += "🧠 Step 2: Synthesized global answer skipped.\n"
         yield answers_md, synthesized_md, conflict_md, status_log
-        
+
     # 3. Detect conflicts
     if run_conflicts:
         if len(indexes) < 2:
@@ -340,28 +383,30 @@ def ask_question(question, run_each, run_synthesized, run_conflicts):
             yield answers_md, synthesized_md, conflict_md, status_log
         else:
             if not doc_answers:
-                # Conflict detection needs per-document answers. If step 1 was skipped, run queries silently.
-                status_log += "⚠️ Step 3: Conflict detection requires individual document answers. Querying documents now...\n"
+                # Conflict detection needs per-document answers. If step 1 was skipped, run queries in parallel.
+                status_log += "⚠️ Step 3: Conflict detection requires individual answers. Querying all documents in parallel...\n"
                 yield answers_md, synthesized_md, conflict_md, status_log
-                
+
+                docs_list = list(indexes.items())
+                args_list = [(doc, index, question) for doc, index in docs_list]
                 answers_list = []
-                for i, (doc, index) in enumerate(indexes.items(), 1):
-                    status_log += f"👉 [{i}/{len(indexes)}] Querying: {doc}...\n"
-                    yield answers_md, synthesized_md, conflict_md, status_log
-                    
-                    try:
-                        qe = index.as_query_engine(similarity_top_k=3)
-                        ans = str(qe.query(question))
-                        doc_answers[doc] = ans
-                        answers_list.append(f"### 📄 {doc}:\n{ans}\n---")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(docs_list), 4)) as executor:
+                    futures = {executor.submit(_query_single_doc, args): args[0] for args in args_list}
+                    for future in concurrent.futures.as_completed(futures):
+                        doc, ans, err = future.result()
+                        if err:
+                            doc_answers[doc] = f"Error: {err}"
+                            answers_list.append(f"### 📄 {doc}:\nError: {err}\n---")
+                        else:
+                            doc_answers[doc] = ans
+                            answers_list.append(f"### 📄 {doc}:\n{ans}\n---")
+                        status_log += f"   ✅ Queried {doc}\n"
                         answers_md = "\n\n".join(answers_list)
-                    except Exception as e:
-                        doc_answers[doc] = f"Error: {e}"
-                    yield answers_md, synthesized_md, conflict_md, status_log
-            
+                        yield answers_md, synthesized_md, conflict_md, status_log
+
             status_log += "⚠️ Step 3: Running conflict detection analysis across sources...\n"
             yield answers_md, synthesized_md, conflict_md, status_log
-            
+
             try:
                 conflict = detect_conflicts(question, doc_answers)
                 if conflict["conflict_found"]:
@@ -383,7 +428,7 @@ def ask_question(question, run_each, run_synthesized, run_conflicts):
     else:
         status_log += "⚠️ Step 3: Conflict analysis skipped.\n"
         yield answers_md, synthesized_md, conflict_md, status_log
-        
+
     status_log += "🎉 Done! All requested tasks finished."
     yield answers_md, synthesized_md, conflict_md, status_log
 
@@ -437,9 +482,9 @@ with gr.Blocks(title="MultiDoc RAG - Light Theme", css=custom_css) as demo:
             )
             
             with gr.Row():
-                run_each_chk = gr.Checkbox(label="Query each doc individually", value=True)
-                run_synthesized_chk = gr.Checkbox(label="Synthesize global answer (Slow)", value=False)
-                run_conflicts_chk = gr.Checkbox(label="Run Conflict Analysis", value=True)
+                run_each_chk = gr.Checkbox(label="Query each doc individually", value=True, interactive=True)
+                run_synthesized_chk = gr.Checkbox(label="Synthesize global answer (Slow)", value=False, interactive=True)
+                run_conflicts_chk = gr.Checkbox(label="Run Conflict Analysis", value=True, interactive=True)
                 
             ask_btn = gr.Button("🚀 Submit Query", variant="secondary", elem_classes="secondary-btn")
             

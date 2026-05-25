@@ -12,10 +12,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# Local data & docs
+# Local data — PDFs and generated vector cache (large binary files)
 data/docs/*
+data/cache/
 
-# Environment variables
+# Environment variables (NEVER commit API keys)
 .env
 
 # IDE / Editor configurations
@@ -25,3 +26,7 @@ data/docs/*
 
 # Logs
 *.log
+
+# Dev scratch scripts and local notes
+scratch/
+run_command.txt

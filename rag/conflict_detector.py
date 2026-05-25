@@ -5,24 +5,36 @@ from dotenv import load_dotenv
 # Load env variables (contains GOOGLE_API_KEY)
 load_dotenv()
 
-CONFLICT_PROMPT = """You are an expert fact-checker. Below are answers to the same question, each from a different document.
+CONFLICT_PROMPT = """You are an expert research analyst comparing findings from multiple documents.
 
-Question: {question}
+Question asked: {question}
+
+Below are the answers from each document:
 
 {answers}
 
-Your task:
-1. Determine if any two answers CONTRADICT each other on a specific factual claim.
-2. If there is a conflict, explain exactly what the conflict is and which documents disagree.
-3. If there is no conflict (answers agree or cover different aspects), say "No conflict detected."
+Your task is to find CONFLICTS between these documents. A conflict exists when documents lead to DIFFERENT or INCOMPATIBLE conclusions about the same topic. Conflicts can be:
 
-Respond in this exact format:
+1. DIRECT: One says "X is true", another says "X is false"
+2. CAPABILITY: One says the system CAN do something (e.g. works in real-time), the other says it CANNOT or is "not yet ready"
+3. SENSOR/METHOD: One requires specific hardware (e.g. EEG headset/brain sensor), another requires different hardware (e.g. webcam/camera) — implying incompatible technical requirements
+4. QUANTITATIVE: They report significantly different numbers for the same metric (e.g. different accuracy figures)
+5. SCOPE/APPLICABILITY: One says the approach is ready for real-world use, another says it only works in controlled/lab conditions
+
+IMPORTANT RULES:
+- Be AGGRESSIVE in finding conflicts. Even if not explicitly stated, if a reader would reach DIFFERENT conclusions from each document about the same question, that IS a conflict.
+- If Document A describes a system that requires X, and Document B describes a system that does NOT require X and uses Y instead — this IS a conflict about what is needed.
+- If one system is described as real-time and another as offline-only — this IS a conflict.
+- Do NOT say "no conflict" just because papers use polite academic language. Look at what the systems actually DO and REQUIRE.
+
+Respond in this EXACT format (do not add extra lines or change the keys):
 CONFLICT_FOUND: yes/no
-EXPLANATION: <your explanation>
-DOCUMENT_A: <name of first conflicting doc, if any>
-DOCUMENT_B: <name of second conflicting doc, if any>
-CLAIM_A: <what document A claims>
-CLAIM_B: <what document B claims>"""
+EXPLANATION: <clear explanation of what exactly conflicts and why>
+DOCUMENT_A: <filename of first conflicting document>
+DOCUMENT_B: <filename of second conflicting document>
+CLAIM_A: <the specific claim or finding from Document A>
+CLAIM_B: <the specific claim or finding from Document B that contradicts Claim A>"""
+
 
 def detect_conflicts(question: str, doc_answers: dict) -> dict:
     """
